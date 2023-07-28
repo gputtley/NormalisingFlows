@@ -1,4 +1,5 @@
 import torch
+import torch.optim.lr_scheduler as lr_scheduler
 import normflows as nf
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,18 +12,22 @@ class NormalisingFlow:
 
   def __init__(self):
 
+    self.flow_type = "RealNVP"
     ### Hyperparameters
     # early stopping
-    self.patience = 40  # Number of epochs to wait for improvement
+    self.patience = 5  # Number of epochs to wait for improvement
     self.min_delta = 0.001  # Minimum change in validation loss to be considered as improvement
     # L2 regularisation strength
     self.l2_regularisation_strength = 0.01
     # Maximum gradient norm for clipping
     self.max_grad_norm = 100.0
     # Training parameters
-    self.batch_size = 256
+    self.batch_size = 2**(12)
     self.epochs = 1000    
-    self.learning_rate = 5e-4
+    self.learning_rate = 5e-3
+    # scheduler
+    self.step_size = 4
+    self.gamma = 0.2
 
     ### Architecture
     self.hidden_layers = [128] # Number of hidden layers in each coupling layer
@@ -40,11 +45,12 @@ class NormalisingFlow:
     self.best_test_loss = float('inf')
     self.epochs_without_improvement = 0
     self.dataset_size = 1
-    self.max_iter = int(self.epochs * np.ceil(self.dataset_size / self.batch_size))
+    self.max_iter = int(self.epochs * np.floor(self.dataset_size / self.batch_size))
     self.max_iter_per_epoch = self.max_iter/self.epochs
     self.train_loss_hist = np.array([])
     self.test_loss_hist = np.array([])
     self.early_stopping = False
+    self.scheduler = None
     self.random_seed = 42
     np.random.seed(self.random_seed)
     torch.manual_seed(self.random_seed)
@@ -55,6 +61,7 @@ class NormalisingFlow:
     self.base = nf.distributions.base.DiagGaussian(self.ndim)
     self.GetModel()
     self.optimiser = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.l2_regularisation_strength)
+    self.scheduler = lr_scheduler.StepLR(self.optimiser, step_size=self.step_size, gamma=self.gamma)
     self.best_model_state = self.model.state_dict()
     self.max_iter = int(self.epochs * np.ceil(self.dataset_size / self.batch_size))
     self.max_iter_per_epoch = self.max_iter/self.epochs
@@ -63,16 +70,23 @@ class NormalisingFlow:
 
   def GetModel(self):
 
-    b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(self.ndim)])
     flows = []
-    for i in range(self.num_layers):
-      s = nf.nets.MLP([self.ndim] + self.hidden_layers + [self.ndim], init_zeros=True)
-      t = nf.nets.MLP([self.ndim] + self.hidden_layers + [self.ndim], init_zeros=True)
-      if i % 2 == 0:
-        flows += [nf.flows.MaskedAffineFlow(b, t, s)]
-      else:
-        flows += [nf.flows.MaskedAffineFlow(1 - b, t, s)]
-      flows += [nf.flows.ActNorm(self.ndim)]
+    if self.flow_type == "RealNVP":
+      b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(self.ndim)])
+      for i in range(self.num_layers):
+        s = nf.nets.MLP([self.ndim] + self.hidden_layers + [self.ndim], init_zeros=True)
+        t = nf.nets.MLP([self.ndim] + self.hidden_layers + [self.ndim], init_zeros=True)
+        if i % 2 == 0:
+          flows += [nf.flows.MaskedAffineFlow(b, t, s)]
+        else:
+          flows += [nf.flows.MaskedAffineFlow(1 - b, t, s)]
+        flows += [nf.flows.ActNorm(self.ndim)]
+    elif self.flow_type == 'Planar':
+      for i in range(self.num_layers):
+        flows.append(nf.flows.Planar((self.ndim,)))
+    elif self.flow_type == 'Radial':
+      for i in range(self.num_layers):
+        flows.append(nf.flows.Radial((self.ndim,)))
 
     # Construct flow model
     self.model = nf.NormalizingFlow(self.base, flows)
@@ -82,7 +96,7 @@ class NormalisingFlow:
     device = torch.device('cuda' if torch.cuda.is_available() and enable_cuda else 'cpu')
     self.model = self.model.to(device)
 
-  def TrainIteration(self,it,x,x_test):
+  def TrainIteration(self,x,x_test,new_epoch=False):
 
     self.optimiser.zero_grad()
 
@@ -106,7 +120,10 @@ class NormalisingFlow:
         self.optimiser.step()
 
     # Reporting and early stopping
-    if it % self.max_iter_per_epoch == 0:
+    if new_epoch:
+
+        # Update learning rate
+        self.scheduler.step()
 
         # Log train loss
         self.train_loss_hist = np.append(self.train_loss_hist, train_loss.to('cpu').data.numpy())
@@ -129,7 +146,7 @@ class NormalisingFlow:
 
         # Check for early stopping
         if self.epochs_without_improvement >= self.patience:
-          print("Early stopping. No improvement in test loss for", patience, "epochs.")
+          print("Early stopping. No improvement in test loss for", self.patience, "epochs.")
           self.early_stopping = True
 
   def Train(self):
@@ -141,10 +158,24 @@ class NormalisingFlow:
 
     self.UpdateParameters()
 
-    for it in tqdm(range(self.max_iter)):
+    for epochs in range(self.epochs):
+      print(">> Epoch",epochs)
       if not self.early_stopping:
-        x = self.data_loader.Sample(tt="train")
-        x_test = self.data_loader.Sample(tt="test")
-        self.TrainIteration(it,x,x_test)
-    
+        for it in tqdm(range(int(np.floor(self.dataset_size / self.batch_size)))):
+          x = self.data_loader.Sample(tt="train",it=it)
+          x_test = self.data_loader.Sample(tt="test",it=it)
+          new_epoch = (it == 0)
+          self.TrainIteration(x,x_test,new_epoch=new_epoch)
+      else:
+        break
+      print("- Train Loss: "+str(round(self.train_loss_hist[-1],3))+", Test Loss: "+str(round(self.test_loss_hist[-1],3)))
 
+    self.model.load_state_dict(self.best_model_state)
+
+  def GenerateData(self,n_samps=1000):
+
+    samp, log_prob = self.model.sample(n_samps)
+    prob = torch.exp(log_prob)
+    prob[torch.isnan(prob)] = 0
+    samp = self.data_loader.InverseRobustScaling(samp)
+    return samp

@@ -53,6 +53,7 @@ def plot_histogram_with_ratio(hist_values1, hist_values2, bin_edges, name_1='His
     plt.subplots_adjust(hspace=0.1)
 
     # Show the plot
+    print("Created "+name+".pdf")
     plt.savefig(name+".pdf")
 
 
