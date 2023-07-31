@@ -1,73 +1,76 @@
+import numpy as np
 import pandas as pd
 import torch
 import gc
 import numpy as np
 from sklearn.model_selection import train_test_split
+import pyarrow.parquet as pq
+from itertools import islice
+import copy
 
-# This is a really simple example where I load all information into memory, can do this much better in future
 class DataLoader:
 
-  def __init__(self):
+  def __init__(self,loc,columns=None):
 
-    self.full = pd.DataFrame()
-    self.train = pd.DataFrame()
-    self.test = pd.DataFrame()
+    self.loc = loc
+    self.pf = pq.ParquetFile(loc)
+    self.num_rows = self.pf.metadata.num_rows
+
     self.train_test_split = 0.5
     self.batch_size = 512
-    self.colums = []   
-
-    self.robust_scaling_median = None
-    self.robust_scaling_iqr = None 
-
-    self.num_rows_train = 0
-    self.num_rows_test = 0
-    self.num_columns = 0
     self.random_seed = 42
-    torch.manual_seed(self.random_seed)
+    self.generator = None
+    self.columns = columns
 
+    samp,_ = self.LoadData(new_epoch=True)
+    self.num_columns = samp.shape[1]
 
-  def PreProcess(self):
+  def PreProcess(self,columns=None,shuffle=False):
+    return None
 
-    torch.manual_seed(self.random_seed)
-    self.columns = list(self.full.columns)
-    self.num_columns = len(self.full.columns)
-    self.RobustScaling()
-    self.train, self.test = train_test_split(self.full, test_size=self.train_test_split)
-    del self.full
-    gc.collect()
-    # put in tensor
-    self.train = torch.tensor(self.train.values,dtype=torch.float32)
-    self.test = torch.tensor(self.test.values,dtype=torch.float32)
+  def LoadData(self,new_epoch=False):
 
-    random_indices = torch.randperm(len(self.train))
-    self.train = self.train[random_indices]
+    if new_epoch:
+      self.generator = self.pf.iter_batches(batch_size=self.batch_size)
+   
+    batch = next(self.generator).to_pandas()
+    if self.columns != None:
+      batch = batch.loc[:,self.columns]
+    x_train, x_test = train_test_split(batch, test_size=self.train_test_split, random_state=self.random_seed)
+    x_train = torch.tensor(x_train.values.astype(np.float32))
+    x_test = torch.tensor(x_test.values.astype(np.float32))
+    return x_train, x_test
 
-    random_indices = torch.randperm(len(self.test))
-    self.test = self.test[random_indices]
+  def MakeHistograms(self,num_bins=20,ignore_quantile=0.01):
 
-    self.num_rows_train = self.train.size(0)
-    self.num_rows_test = self.test.size(0)
+    # initial loop through to find min and max value for each histogram
+  
+    if self.columns != None:
+      columns = self.columns
+    else:
+      columns = [field.name for field in self.pf.schema]
+  
+    min_max_quant = {k:[0,0] for k in columns}
+    self.generator = self.pf.iter_batches(batch_size=self.batch_size)
+    for i in range(0,int(np.floor(self.num_rows/self.batch_size))):
+      batch = next(self.generator).to_pandas()
+      for k in columns:
+        min_max_quant[k] = [min_max_quant[k][0]+batch.loc[:,k].quantile(ignore_quantile),min_max_quant[k][1]+batch.loc[:,k].quantile(1-ignore_quantile)]
+      
+    for k, v in min_max_quant.items():
+      min_max_quant[k] = v/np.floor(self.num_rows/self.batch_size)
+    
+    # second loop through to stack histograms
 
-  def Sample(self,tt="train",it=0):
-
-    if tt == "train":
-      x = self.train[it*self.batch_size:(it+1)*self.batch_size]
-    elif tt == "test":
-      x = self.test[it*self.batch_size:(it+1)*self.batch_size]
-    return x
-
-  def RobustScaling(self):
-
-    self.median = self.full.median()
-    q1 = self.full.quantile(0.25)
-    q3 = self.full.quantile(0.75)
-    self.iqr = q3 - q1
-
-    self.full = (self.full - self.median) / self.iqr
-
-  def InverseRobustScaling(self,samp):
-
-    df_out = pd.DataFrame(samp.detach().numpy(), columns=self.columns)
-    df_out = df_out * self.iqr + self.median
-    df_out[~df_out.isin([np.inf,-np.inf, np.nan]).any(axis=1)]   
-    return df_out
+    bin_edges = {k:np.linspace(v[0],v[1], num_bins + 1) for k, v in min_max_quant.items()}
+    hists = {}
+    self.generator = self.pf.iter_batches(batch_size=self.batch_size)
+    for i in range(0,int(np.floor(self.num_rows/self.batch_size))):
+      batch = next(self.generator).to_pandas()
+      for k in columns:
+        if k in hists.keys():
+          hists[k]+= np.histogram(batch.loc[:,k],bins=bin_edges[k])[0]
+        else:
+          hists[k],_ = np.histogram(batch.loc[:,k],bins=bin_edges[k])
+      
+    return bin_edges,hists
