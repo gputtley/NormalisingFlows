@@ -40,6 +40,8 @@ class NormalisingFlow:
     ### Architecture
     self.hidden_layers = [128] # Number of hidden layers in each coupling layer
     self.num_layers = 16 # Number of coupling layers
+    self.masking = "Alternate Random" # Can be "Alternate Random", "Alternate Fixed", "Random"
+    self.masking_nrand = 4
 
     ### Dataset
     self.data_loader = DataLoader(loc,columns=columns)
@@ -67,7 +69,7 @@ class NormalisingFlow:
     
     ### Other
     self.columns = columns
-    self.verbosity = 1
+    self.verbosity = 2
     
   def SetParameters(self,config_dict):
     
@@ -94,14 +96,30 @@ class NormalisingFlow:
     flows = []
     flows += [nf.flows.ActNorm(self.ndim)]
     if self.flow_type == "RealNVP":
-      b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(self.ndim)])
       for i in range(self.num_layers):
         s = nf.nets.MLP([self.ndim] + self.hidden_layers + [self.ndim], init_zeros=True)
         t = nf.nets.MLP([self.ndim] + self.hidden_layers + [self.ndim], init_zeros=True)
-        if i % 2 == 0:
-          flows += [nf.flows.MaskedAffineFlow(b, t, s)]
-        else:
-          flows += [nf.flows.MaskedAffineFlow(1 - b, t, s)]
+        
+        if "Alternate" in self.masking:
+      
+          if i % 2 == 0:
+            
+            if "Random" in self.masking:
+              b = torch.zeros(self.ndim, dtype=torch.int)
+              random_indices = torch.randperm(self.ndim)[:self.ndim//2]
+              b[random_indices] = 1
+            elif "Fixed" in self.masking:
+              b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(self.ndim)])
+
+          else:
+            b = 1 - b
+            
+        elif "Random" in self.masking:
+          b = torch.zeros(self.ndim, dtype=torch.int)
+          random_indices = torch.randperm(self.ndim)[:self.masking_nrand]
+          b[random_indices] = 1  
+          
+        flows += [nf.flows.MaskedAffineFlow(b, t, s)]
         flows += [nf.flows.ActNorm(self.ndim)]
 
     # Construct flow model
@@ -150,7 +168,7 @@ class NormalisingFlow:
       self.test_loss_hist = np.append(self.test_loss_hist, test_loss.to('cpu').data.numpy())
 
       # Plot loss
-      if self.verbosity > 0:
+      if self.verbosity > 1:
         plot_loss(self.train_loss_hist,self.test_loss_hist,xlabel="Epoch")
 
       # Check if test loss has improved

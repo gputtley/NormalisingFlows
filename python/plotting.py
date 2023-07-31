@@ -55,9 +55,10 @@ def plot_histogram_with_ratio(hist_values1, hist_values2, bin_edges, name_1='His
     # Show the plot
     print("Created "+name+".pdf")
     plt.savefig(name+".pdf")
+    plt.close()
 
 
-def plot_loss(train_loss_hist,test_loss_hist,xlabel="",max_val_before_nan=100):
+def plot_loss(train_loss_hist,test_loss_hist,xlabel="",max_val_before_nan=1000000):
     # Plot loss
     train_loss_hist =  [i if i < max_val_before_nan else np.nan for i in train_loss_hist]
     test_loss_hist =  [i if i < max_val_before_nan else np.nan for i in test_loss_hist]

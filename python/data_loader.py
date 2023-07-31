@@ -63,14 +63,17 @@ class DataLoader:
     # second loop through to stack histograms
 
     bin_edges = {k:np.linspace(v[0],v[1], num_bins + 1) for k, v in min_max_quant.items()}
-    hists = {}
+    hists = {"train":{},"test":{},"combined":{}}
     self.generator = self.pf.iter_batches(batch_size=self.batch_size)
     for i in range(0,int(np.floor(self.num_rows/self.batch_size))):
-      batch = next(self.generator).to_pandas()
-      for k in columns:
-        if k in hists.keys():
-          hists[k]+= np.histogram(batch.loc[:,k],bins=bin_edges[k])[0]
-        else:
-          hists[k],_ = np.histogram(batch.loc[:,k],bins=bin_edges[k])
+      batch = {}
+      batch["combined"] = next(self.generator).to_pandas()
+      batch["train"], batch["test"] = train_test_split(batch["combined"], test_size=self.train_test_split, random_state=self.random_seed)
+      for t in hists.keys():
+        for k in columns:
+          if k in hists[t].keys():
+            hists[t][k]+= np.histogram(batch[t].loc[:,k],bins=bin_edges[k])[0]
+          else:
+            hists[t][k],_ = np.histogram(batch[t].loc[:,k],bins=bin_edges[k])
       
     return bin_edges,hists
